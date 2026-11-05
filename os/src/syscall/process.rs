@@ -1,5 +1,5 @@
 //! Process management syscalls
-use crate::{mm::translated_byte_buffer, task::{change_program_brk, current_user_token, exit_current_and_run_next, suspend_current_and_run_next}, timer::get_time_us};
+use crate::{mm::{translated_byte_buffer, PTEFlags, PageTable, VirtAddr}, task::{change_program_brk, current_user_token, exit_current_and_run_next, get_current_syscall_count, suspend_current_and_run_next}, timer::get_time_us};
 
 #[repr(C)]
 #[derive(Debug)]
@@ -60,11 +60,61 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     0
 }
 
+/// support function: write user byte with check
+fn write_user_byte(token: usize, addr: usize, value: u8) -> bool {
+    let va = VirtAddr::from(addr);
+    let page_table = PageTable::from_token(token);
+
+    let pte = match page_table.translate(va.floor()) {
+        Some(pte) => pte,
+        None => return false,
+    };
+
+    let flags =pte.flags();
+    if !pte.is_valid()
+        || !flags.contains(PTEFlags::U)
+        || !flags.contains(PTEFlags::W) {
+        return false;
+    }
+
+    let page = pte.ppn().get_bytes_array();
+    page[va.page_offset()] = value;
+    true
+}
+
+/// support function: read user byte with check
+fn read_user_byte(token: usize, addr: usize) -> Option<u8> {
+    let va = VirtAddr::from(addr);
+    let page_table = PageTable::from_token(token);
+
+    let pte = page_table.translate(va.floor())?;
+
+    let flags = pte.flags();
+    if !pte.is_valid()
+        || !flags.contains(PTEFlags::U)
+        || !flags.contains(PTEFlags::R) {
+        return None;
+    }
+
+    let page = pte.ppn().get_bytes_array();
+    Some(page[va.page_offset()])
+}
+
 /// TODO: Finish sys_trace to pass testcases
 /// HINT: You might reimplement it with virtual memory management.
-pub fn sys_trace(_trace_request: usize, _id: usize, _data: usize) -> isize {
+pub fn sys_trace(trace_request: usize, id: usize, data: usize) -> isize {
     trace!("kernel: sys_trace");
-    -1
+    
+    match trace_request {
+        0 => read_user_byte(current_user_token(), id)
+            .map(|value| value as isize)
+            .unwrap_or(-1),
+        1 => if write_user_byte(current_user_token(), id, data as u8) { 0 } else { -1 },
+        2 => get_current_syscall_count(id)
+            .map(|count| count as isize)
+            .unwrap_or(-1),
+        _ => -1,
+    }
 }
 
 // YOUR JOB: Implement mmap.
