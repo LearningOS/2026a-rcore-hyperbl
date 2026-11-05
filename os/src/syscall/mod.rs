@@ -28,9 +28,9 @@ const SYSCALL_TRACE: usize = 410;
 mod fs;
 mod process;
 
+use crate::task::count_current_syscall;
 use fs::*;
 use process::*;
-use crate::task::count_current_syscall;
 
 /// syscall count struct
 #[derive(Clone, Copy)]
@@ -56,7 +56,16 @@ pub struct SyscallCount {
 impl SyscallCount {
     /// new
     pub fn new() -> Self {
-        Self { write: 0, exit: 0, yield_: 0, get_time: 0, sbrk: 0, munmap: 0, mmap: 0, trace: 0 }
+        Self {
+            write: 0,
+            exit: 0,
+            yield_: 0,
+            get_time: 0,
+            sbrk: 0,
+            munmap: 0,
+            mmap: 0,
+            trace: 0,
+        }
     }
 
     /// count

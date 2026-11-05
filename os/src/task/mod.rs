@@ -15,6 +15,7 @@ mod switch;
 mod task;
 
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{MapPermission, VirtAddr};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
@@ -133,6 +134,20 @@ impl TaskManager {
         inner.tasks[cur].change_program_brk(size)
     }
 
+    /// Add a framed mapping to the current task's user address space.
+    fn mmap_current(&self, start: VirtAddr, end: VirtAddr, permission: MapPermission) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur].memory_set.mmap(start, end, permission)
+    }
+
+    /// Remove a mapping range from the current task's user address space.
+    fn munmap_current(&self, start: VirtAddr, end: VirtAddr) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur].memory_set.munmap(start, end)
+    }
+
     /// Switch current `Running` task to the task we have found,
     /// or there is no `Ready` task and we can exit with all applications completed
     fn run_next_task(&self) {
@@ -215,6 +230,16 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Map pages in the current task's address space.
+pub fn mmap_current(start: VirtAddr, end: VirtAddr, permission: MapPermission) -> bool {
+    TASK_MANAGER.mmap_current(start, end, permission)
+}
+
+/// Unmap pages in the current task's address space.
+pub fn munmap_current(start: VirtAddr, end: VirtAddr) -> bool {
+    TASK_MANAGER.munmap_current(start, end)
 }
 
 /// Count specific syscall of current task, only used in `syscall`

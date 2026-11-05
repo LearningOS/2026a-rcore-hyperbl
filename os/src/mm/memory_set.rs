@@ -233,6 +233,111 @@ impl MemorySet {
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
         self.page_table.translate(vpn)
     }
+    /// Map a user-provided range after checking that every page is unused.
+    pub fn mmap(&mut self, start: VirtAddr, end: VirtAddr, permission: MapPermission) -> bool {
+        let start_vpn = start.floor();
+        let end_vpn = end.ceil();
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            if self
+                .page_table
+                .translate(vpn)
+                .map_or(false, |pte| pte.is_valid())
+            {
+                return false;
+            }
+        }
+
+        let mut area = MapArea::new(start, end, MapType::Framed, permission);
+        // Mapping is committed only after all data frames have been allocated.
+        if !area.try_map(&mut self.page_table) {
+            return false;
+        }
+        self.areas.push(area);
+        true
+    }
+
+    /// Unmap a user range and split affected areas when the range is in the middle.
+    pub fn munmap(&mut self, start: VirtAddr, end: VirtAddr) -> bool {
+        let start_vpn = start.floor();
+        let end_vpn = end.ceil();
+
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            if !self
+                .page_table
+                .translate(vpn)
+                .map_or(false, |pte| pte.is_valid())
+            {
+                return false;
+            }
+            // Only areas owned by this address space can be released here;
+            // the trampoline is a special page-table mapping, not a MapArea.
+            if !self
+                .areas
+                .iter()
+                .any(|area| area.vpn_range.get_start() <= vpn && vpn < area.vpn_range.get_end())
+            {
+                return false;
+            }
+        }
+
+        let old_areas = core::mem::take(&mut self.areas);
+        let mut new_areas = Vec::new();
+        for mut area in old_areas {
+            let area_start = area.vpn_range.get_start();
+            let area_end = area.vpn_range.get_end();
+            let cut_start = if area_start > start_vpn {
+                area_start
+            } else {
+                start_vpn
+            };
+            let cut_end = if area_end < end_vpn {
+                area_end
+            } else {
+                end_vpn
+            };
+
+            if cut_start >= cut_end {
+                new_areas.push(area);
+                continue;
+            }
+
+            // Remove both the page-table entry and its owned physical frame.
+            for vpn in VPNRange::new(cut_start, cut_end) {
+                area.unmap_one(&mut self.page_table, vpn);
+            }
+
+            let map_type = area.map_type;
+            let map_perm = area.map_perm;
+            let mut left_frames = BTreeMap::new();
+            let mut right_frames = BTreeMap::new();
+            for (vpn, frame) in core::mem::take(&mut area.data_frames) {
+                if vpn < cut_start {
+                    left_frames.insert(vpn, frame);
+                } else if vpn >= cut_end {
+                    right_frames.insert(vpn, frame);
+                }
+            }
+            if area_start < cut_start {
+                new_areas.push(MapArea {
+                    vpn_range: VPNRange::new(area_start, cut_start),
+                    data_frames: left_frames,
+                    map_type,
+                    map_perm,
+                });
+            }
+            if cut_end < area_end {
+                new_areas.push(MapArea {
+                    vpn_range: VPNRange::new(cut_end, area_end),
+                    data_frames: right_frames,
+                    map_type,
+                    map_perm,
+                });
+            }
+        }
+        self.areas = new_areas;
+        true
+    }
+
     /// shrink the area to new_end
     #[allow(unused)]
     pub fn shrink_to(&mut self, start: VirtAddr, new_end: VirtAddr) -> bool {
@@ -313,6 +418,33 @@ impl MapArea {
         for vpn in self.vpn_range {
             self.map_one(page_table, vpn);
         }
+    }
+    /// Allocate all data frames before publishing any mapping to the page table.
+    fn try_map(&mut self, page_table: &mut PageTable) -> bool {
+        let mut frames = Vec::new();
+        if self.map_type == MapType::Framed {
+            for vpn in self.vpn_range {
+                let frame = match frame_alloc() {
+                    Some(frame) => frame,
+                    None => return false,
+                };
+                frames.push((vpn, frame));
+            }
+        }
+
+        let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
+        if self.map_type == MapType::Identical {
+            for vpn in self.vpn_range {
+                page_table.map(vpn, PhysPageNum(vpn.0), pte_flags);
+            }
+        } else {
+            for (vpn, frame) in frames {
+                let ppn = frame.ppn;
+                self.data_frames.insert(vpn, frame);
+                page_table.map(vpn, ppn, pte_flags);
+            }
+        }
+        true
     }
     #[allow(unused)]
     pub fn unmap(&mut self, page_table: &mut PageTable) {
